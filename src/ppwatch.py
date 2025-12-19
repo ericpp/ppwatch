@@ -153,10 +153,10 @@ class PodpingIRCBot:
             logger.debug(f"Failed to fetch metadata for {url}: {e}")
             return None, None
 
-    async def _check_live_item_status(self, feed_url: str) -> Optional[bool]:
+    async def _check_live_item_status(self, feed_url: str) -> Tuple[Optional[bool], Optional[str]]:
         """
         Fetch feed and check if any liveItem tags have status="live".
-        Returns True if live, False if not live, None if error/not found.
+        Returns (True if live, False if not live, None if error/not found, error_message if error).
         """
         try:
             async with asyncio_timeout(self.config.api_timeout):
@@ -178,17 +178,27 @@ class PodpingIRCBot:
                         status = live_item.get('status', '').lower()
                         if status == 'live':
                             logger.debug(f"Found liveItem with status='live' in {feed_url}")
-                            return True
+                            return True, None
 
                     logger.debug(f"No live items found in {feed_url}")
-                    return False
+                    return False, None
 
         except asyncio.TimeoutError:
-            logger.warning(f"Timeout fetching feed {feed_url}")
-            return None
+            error_msg = f"Timeout fetching feed {feed_url}"
+            logger.warning(error_msg)
+            return None, error_msg
+        except httpx.HTTPStatusError as e:
+            error_msg = f"HTTP {e.response.status_code} {e.response.reason_phrase} fetching feed {feed_url}"
+            logger.warning(f"Error checking live item status for {feed_url}: {error_msg}")
+            return None, error_msg
+        except httpx.RequestError as e:
+            error_msg = f"Request error fetching feed {feed_url}: {str(e)}"
+            logger.warning(f"Error checking live item status for {feed_url}: {error_msg}")
+            return None, error_msg
         except Exception as e:
-            logger.warning(f"Error checking live item status for {feed_url}: {e}")
-            return None
+            error_msg = f"Error checking live item status for {feed_url}: {str(e)}"
+            logger.warning(error_msg)
+            return None, error_msg
 
     async def _verify_live_status(self, url: str, reason: str) -> Tuple[bool, str]:
         """
@@ -199,11 +209,14 @@ class PodpingIRCBot:
             # No verification needed for other reasons
             return True, ""
 
-        is_live = await self._check_live_item_status(url)
+        is_live, error_msg = await self._check_live_item_status(url)
         error = None
 
         if is_live is None:
-            warning = f"Warning: Could not verify liveItem status"
+            if error_msg:
+                warning = f"Warning: Could not verify liveItem status - {error_msg}"
+            else:
+                warning = f"Warning: Could not verify liveItem status"
             logger.warning(f"{warning} for {url} (reason: {reason})")
             return True, warning  # Allow it but warn
 
