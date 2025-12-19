@@ -68,6 +68,9 @@ class BotConfig:
     api_timeout: float = 10.0  # Timeout for API calls
     command_timeout: float = 30.0  # Max time for command execution
 
+    # User agent for feed fetching
+    user_agent_email: str = "user@email.com"  # Email for User-Agent header
+
 
 class PodpingIRCBot:
     """IRC bot that monitors podping and posts updates to channels."""
@@ -157,7 +160,10 @@ class PodpingIRCBot:
         """
         try:
             async with asyncio_timeout(self.config.api_timeout):
-                async with httpx.AsyncClient(follow_redirects=True) as client:
+                async with httpx.AsyncClient(
+                    follow_redirects=True,
+                    headers={"User-Agent": f"PodPing Watch/{self.config.user_agent_email}"}
+                ) as client:
                     response = await client.get(feed_url)
                     response.raise_for_status()
 
@@ -665,6 +671,7 @@ def load_config(config_path: Path) -> BotConfig:
         message_delay=data.get("message_delay", 1.0),
         api_timeout=data.get("api_timeout", 10.0),
         command_timeout=data.get("command_timeout", 30.0),
+        user_agent_email=data.get("user_agent_email", "user@email.com"),
     )
 
 
@@ -680,7 +687,7 @@ async def main() -> None:
         help="Path to configuration file"
     )
     args = parser.parse_args()
-    
+
     try:
         config = load_config(args.config)
         bot = PodpingIRCBot(config)
