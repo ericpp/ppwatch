@@ -1,0 +1,31 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "ppwatch"
+version = "1.0.0"
+description = "IRC bot that posts podping updates to IRC channels"
+readme = "README.md"
+requires-python = ">=3.8"
+license = {text = "MIT"}
+authors = [
+    {name = "ericpp", email = "ericpp@gmail.com"},
+]
+keywords = ["podcast", "podping", "irc", "rss", "feeds"]
+
+dependencies = [
+    "asif",
+    "httpx>=0.24.0",
+    "async-timeout>=5.0.1",
+    "pypodping",
+    "podcast_index",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["."]
+
+[tool.uv.sources]
+asif = { path = "asif", editable = true }
+pypodping = { git = "https://github.com/ericpp/pypodping.git" }
+podcast_index = { path = "podcast_index" }

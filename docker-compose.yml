@@ -1,0 +1,41 @@
+version: '3.8'
+
+services:
+  ppwatch:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      # Configuration file path (can be overridden)
+      - CONFIG_FILE=irc_bot_config.json
+      # Python settings
+      - PYTHONUNBUFFERED=1
+      - PYTHONPATH=/app/src
+    volumes:
+      # Mount config file for easy editing
+      - ./irc_bot_config.json:/app/irc_bot_config.json:ro
+      # Optional: Mount logs directory
+      - ./logs:/app/logs
+    networks:
+      - podping-network
+    # Health check
+    healthcheck:
+      test: ["CMD", "python", "-c", "import sys; sys.exit(0)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    # Resource limits
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: '0.5'
+        reservations:
+          memory: 256M
+          cpus: '0.25'
+
+networks:
+  podping-network:
+    driver: bridge
