@@ -112,22 +112,6 @@ class PodpingIRCBot:
             url = 'https://' + url[7:]
         return url
 
-    @staticmethod
-    def _encode_feed_url(url: str) -> str:
-        """Percent-encode feed URL so it is a valid IRI for podping writes."""
-        try:
-            parts = urlsplit(url)
-        except Exception:
-            # If parsing fails, fall back to the original URL
-            return url
-
-        path = quote(parts.path, safe="/%")
-        query = quote(parts.query, safe="=&%")
-        fragment = quote(parts.fragment, safe="=%")
-
-        return urlunsplit((parts.scheme, parts.netloc, path, query, fragment))
-
-
     def _is_authorized(self, nick: str) -> bool:
         """Check if user is authorized to manage subscriptions."""
         # Require explicit authorization if runtime subscriptions enabled
@@ -432,12 +416,8 @@ class PodpingIRCBot:
 
             # Write podping with timeout
             reason = reason or "update"  # Ensure reason is not None
-            safe_url = self._encode_feed_url(metadata.url)
-            if safe_url != metadata.url:
-                logger.debug(f"Percent-encoding feed URL for podping: {metadata.url} -> {safe_url}")
-
-            logger.info(f"Writing podping for feed {feed_id}: {safe_url} (reason: {reason})")
-            result = await self.podping_writer.post(safe_url, reason=reason)
+            logger.info(f"Writing podping for feed {feed_id}: {metadata.url} (reason: {reason})")
+            result = await self.podping_writer.post(metadata.url, reason=reason)
             rc_percent = await self.podping_writer.get_credits()
             rc_used = 100 - rc_percent if rc_percent is not None else None
 
@@ -447,14 +427,14 @@ class PodpingIRCBot:
             tx_url = f"https://hive.ausbit.dev/tx/{tx_id}"
             rc_info = f" rc used: {rc_used:.1f}%" if rc_used is not None else ""
 
-            msg = f"Podping sent: {metadata.title} {safe_url} ({reason_display}) (tx: {tx_url}{rc_info})"
+            msg = f"Podping sent: {metadata.title} {metadata.url} ({reason_display}) (tx: {tx_url}{rc_info})"
             logger.info(f"Podping sent by {nick} for feed {feed_id}: tx {tx_id} (reason: {reason_display}){rc_info}")
 
             await self._send_message(target, msg)
 
             # Verify live/liveEnd status after sending (if applicable)
             if reason in ('live', 'liveEnd'):
-                is_valid, message = await self._verify_live_status(safe_url, reason)
+                is_valid, message = await self._verify_live_status(metadata.url, reason)
                 if not is_valid or message:
                     await self._send_message(target, f"  → {message}")
 
