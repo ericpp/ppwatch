@@ -12,7 +12,7 @@ from urllib.parse import quote, urlsplit, urlunsplit
 from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, Set, Optional, Tuple
+from typing import Dict, Set, Optional, Tuple, List
 from xml.etree import ElementTree as ET
 
 import httpx
@@ -53,6 +53,7 @@ class BotConfig:
     # Podping writer (Hive)
     hive_account: str = ""
     hive_posting_key: str = ""
+    hive_nodes: List[str] = field(default_factory=list)
     hive_dry_run: bool = True
 
     # Channel subscriptions: channel -> set of URLs
@@ -576,6 +577,7 @@ class PodpingIRCBot:
                 self.podping_writer = PodpingWriter(
                     account=self.config.hive_account,
                     posting_key=self.config.hive_posting_key,
+                    nodes=self.config.hive_nodes,
                     dry_run=self.config.hive_dry_run
                 )
                 print(repr(self.podping_writer))
@@ -654,6 +656,7 @@ def load_config(config_path: Path) -> BotConfig:
         # Podping writer
         hive_account=pw.get("hive_account", ""),
         hive_posting_key=pw.get("hive_posting_key", ""),
+        hive_nodes=pw.get("hive_nodes", []),
         hive_dry_run=pw.get("dry_run", True),
         # Subscriptions
         channel_subscriptions=channel_subs,
