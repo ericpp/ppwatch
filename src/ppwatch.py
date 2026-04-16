@@ -8,11 +8,10 @@ import asyncio
 import json
 import logging
 import re
-from urllib.parse import quote, urlsplit, urlunsplit
 from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, Set, Optional, Tuple, List
+from typing import Dict, List, Optional, Set, Tuple
 from xml.etree import ElementTree as ET
 
 import httpx
@@ -98,7 +97,6 @@ class PodpingIRCBot:
         self.podcast_index: Optional[PodcastIndexClient] = None
         self.podping_writer: Optional[PodpingWriter] = None
         self.watcher: Optional[PodpingWatcher] = None
-
 
         self._setup_handlers()
 
@@ -193,8 +191,7 @@ class PodpingIRCBot:
         Returns (is_valid, message).
         """
         if reason not in ('live', 'liveEnd'):
-            # No verification needed for other reasons
-            return True, ""
+            return True, None
 
         is_live, error_msg = await self._check_live_item_status(url)
         error = None
@@ -203,7 +200,7 @@ class PodpingIRCBot:
             if error_msg:
                 warning = f"Warning: Could not verify liveItem status - {error_msg}"
             else:
-                warning = f"Warning: Could not verify liveItem status"
+                warning = "Warning: Could not verify liveItem status"
             logger.warning(f"{warning} for {url} (reason: {reason})")
             return True, warning  # Allow it but warn
 
@@ -240,7 +237,7 @@ class PodpingIRCBot:
         )
 
         # Group URLs by interested channel
-        channel_urls: Dict[str, list[str]] = defaultdict(list)
+        channel_urls: Dict[str, List[str]] = defaultdict(list)
         for url in podping_data.urls:
             normalized = self._normalize_url(url)
             for channel, urls in self._normalized_subscriptions.items():
@@ -437,14 +434,12 @@ class PodpingIRCBot:
             rc_percent = await self.podping_writer.get_credits()
             rc_used = 100 - rc_percent if rc_percent is not None else None
 
-            # Format success response
-            reason_display = reason or "update"
             tx_id = result["tx_id"]
             tx_url = f"https://hive.ausbit.dev/tx/{tx_id}"
             rc_info = f" rc used: {rc_used:.1f}%" if rc_used is not None else ""
 
-            msg = f"Podping sent: {metadata.title} {metadata.url} ({reason_display}) (tx: {tx_url}{rc_info})"
-            logger.info(f"Podping sent by {nick} for feed {feed_id}: tx {tx_id} (reason: {reason_display}){rc_info}")
+            msg = f"Podping sent: {metadata.title} {metadata.url} ({reason}) (tx: {tx_url}{rc_info})"
+            logger.info(f"Podping sent by {nick} for feed {feed_id}: tx {tx_id} (reason: {reason}){rc_info}")
 
             await self._send_message(target, msg)
 
@@ -545,7 +540,7 @@ class PodpingIRCBot:
     async def _route_ppwatch_command(
         self,
         nick: str,
-        parts: list[str],
+        parts: List[str],
         channel: Optional[str]
     ) -> None:
         """Route ppwatch command to appropriate handler."""
@@ -556,29 +551,24 @@ class PodpingIRCBot:
             await self._handle_list(nick, channel)
 
         elif parts[0] == "subscribe":
-            if len(parts) < 2:
-                await self._send_message(nick, "Usage: subscribe <channel> <url>")
-            elif len(parts) < 3:
-                # Channel context or missing URL
-                if channel:
-                    await self._send_message(nick, "Usage: subscribe <url>")
-                else:
-                    await self._send_message(nick, "Usage: subscribe <channel> <url>")
+            if channel and len(parts) >= 2:
+                await self._handle_subscribe(nick, channel, parts[1])
+            elif not channel and len(parts) >= 3:
+                await self._handle_subscribe(nick, parts[1], parts[2])
+            elif channel:
+                await self._send_message(nick, "Usage: subscribe <url>")
             else:
-                target_channel = channel or parts[1]
-                url = parts[2] if channel else parts[2]
-                url_arg = parts[1] if channel else url
-                await self._handle_subscribe(nick, target_channel, url_arg)
+                await self._send_message(nick, "Usage: subscribe <channel> <url>")
 
         elif parts[0] == "unsubscribe":
-            if len(parts) < 3 and not channel:
-                await self._send_message(nick, "Usage: unsubscribe <channel> <url>")
-            elif len(parts) < 2:
+            if channel and len(parts) >= 2:
+                await self._handle_unsubscribe(nick, channel, parts[1])
+            elif not channel and len(parts) >= 3:
+                await self._handle_unsubscribe(nick, parts[1], parts[2])
+            elif channel:
                 await self._send_message(nick, "Usage: unsubscribe <url>")
             else:
-                target_channel = channel or parts[1]
-                url_arg = parts[1] if channel else parts[2]
-                await self._handle_unsubscribe(nick, target_channel, url_arg)
+                await self._send_message(nick, "Usage: unsubscribe <channel> <url>")
 
         elif parts[0] == "pp":
             if len(parts) < 2:
@@ -608,7 +598,6 @@ class PodpingIRCBot:
                     nodes=self.config.hive_nodes,
                     dry_run=self.config.hive_dry_run
                 )
-                print(repr(self.podping_writer))
                 logger.info(f"Podping writer initialized (dry_run={self.config.hive_dry_run})")
             except Exception as e:
                 logger.error(f"Error initializing podping writer: {e}")
@@ -639,7 +628,6 @@ class PodpingIRCBot:
                 await watcher_task
             except asyncio.CancelledError:
                 pass
-
 
 
 def load_config(config_path: Path) -> BotConfig:
