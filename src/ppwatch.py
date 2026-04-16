@@ -18,6 +18,7 @@ from xml.etree import ElementTree as ET
 import httpx
 from asif.bot import Client, Channel
 from pypodping import PodpingWatcher, PodpingWriter, PodpingError
+from pypodping.errors import PodpingNetworkError
 from podcast_index import PodcastIndexClient
 
 # Compatibility for Python < 3.11
@@ -72,6 +73,9 @@ class BotConfig:
     # User agent for feed fetching
     user_agent_email: str = "user@email.com"  # Email for User-Agent header
 
+    # Feed aliases: name -> feed_id (e.g. {"bts": 150842})
+    feed_aliases: Dict[str, int] = field(default_factory=dict)
+
 
 class PodpingIRCBot:
     """IRC bot that monitors podping and posts updates to channels."""
@@ -118,8 +122,6 @@ class PodpingIRCBot:
         # Require explicit authorization if runtime subscriptions enabled
         return (self.config.allow_runtime_subscriptions
                 and nick in self.config.authorized_users)
-
-
 
     async def _get_podcast_info(self, url: str) -> Tuple[Optional[str], Optional[int]]:
         """Get podcast title and ID from Podcast Index with timeout."""
@@ -292,8 +294,11 @@ class PodpingIRCBot:
         await self._send_message(nick, f"  list - Show all subscriptions")
         await self._send_message(nick, f"  subscribe <channel> <url> - Subscribe to updates")
         await self._send_message(nick, f"  unsubscribe <channel> <url> - Unsubscribe")
-        await self._send_message(nick, f"  pp <feed_id> [reason] - Write podping to Hive")
+        await self._send_message(nick, f"  pp <feed_id_or_alias> [reason] - Write podping to Hive")
         await self._send_message(nick, f"    Valid reasons: live, liveEnd, update (default: update)")
+        if self.config.feed_aliases:
+            aliases = ", ".join(f"{name}={fid}" for name, fid in sorted(self.config.feed_aliases.items()))
+            await self._send_message(nick, f"    Aliases: {aliases}")
 
     async def _handle_list(self, nick: str, channel: Optional[str] = None) -> None:
         """List subscriptions (specific channel or all)."""
@@ -375,15 +380,26 @@ class PodpingIRCBot:
         await self._send_message(nick, f"Stopped monitoring {url} in {channel}")
         logger.info(f"{channel} unsubscribed from {url} (by {nick})")
 
+    def _resolve_feed_alias(self, feed_id_str: str) -> Tuple[str, Optional[str]]:
+        """Resolve a feed alias to its numeric ID.
+        Returns (resolved_id_str, alias_name_or_None)."""
+        alias_key = feed_id_str.lower()
+        if alias_key in self.config.feed_aliases:
+            return str(self.config.feed_aliases[alias_key]), feed_id_str
+        return feed_id_str, None
+
     async def _handle_pp(self, nick: str, feed_id_str: str, reason: Optional[str] = None, channel: Optional[str] = None) -> None:
         """Handle !pp command with timeout and error handling."""
-        # Determine target for response (channel or user)
         target = channel if channel else nick
 
-        # Send immediate feedback that we're processing the command
-        await self._send_message(target, f"Sending podping for feed ID {feed_id_str}...")
+        # Resolve alias before anything else
+        feed_id_str, alias_used = self._resolve_feed_alias(feed_id_str)
 
-        # Validate prerequisites
+        if alias_used:
+            await self._send_message(target, f"Sending podping for {alias_used} (feed ID {feed_id_str})...")
+        else:
+            await self._send_message(target, f"Sending podping for feed ID {feed_id_str}...")
+
         if not self.podcast_index:
             await self._send_message(target, "Error: Podcast Index not configured")
             return
@@ -392,11 +408,10 @@ class PodpingIRCBot:
             await self._send_message(target, "Error: Podping writer not configured")
             return
 
-        # Validate feed ID
         try:
             feed_id = int(feed_id_str)
         except ValueError:
-            await self._send_message(target, f"Error: Invalid feed ID '{feed_id_str}' (must be a number)")
+            await self._send_message(target, f"Error: Invalid feed ID '{feed_id_str}' (must be a number or alias)")
             return
 
         # Validate reason if provided
@@ -444,9 +459,22 @@ class PodpingIRCBot:
             logger.error(f"Timeout in pp command by {nick} for feed {feed_id}")
             await self._send_message(target, error_msg)
 
-        except Exception as e:
+        except PodpingNetworkError as e:
+            # Network/blockchain errors are expected and transient
+            error_msg = f"Error: Hive network error for feed {feed_id} - please try again in a moment"
+            logger.warning(f"Network error in pp command by {nick} for feed {feed_id}: {e}")
+            await self._send_message(target, error_msg)
+
+        except PodpingError as e:
+            # Other podping errors (validation, etc.)
             error_msg = f"Error: Failed to write podping for feed {feed_id}: {str(e)}"
-            logger.error(f"Error in pp command by {nick}: {e}", exc_info=True)
+            logger.warning(f"Podping error in pp command by {nick} for feed {feed_id}: {e}")
+            await self._send_message(target, error_msg)
+
+        except Exception as e:
+            # Unexpected errors - log with full traceback
+            error_msg = f"Error: Unexpected error writing podping for feed {feed_id}: {str(e)}"
+            logger.error(f"Unexpected error in pp command by {nick}: {e}", exc_info=True)
             await self._send_message(target, error_msg)
 
     def _setup_handlers(self) -> None:
@@ -500,7 +528,7 @@ class PodpingIRCBot:
                 reason = parts[2] if len(parts) >= 3 else None
                 await self._handle_pp(nick, parts[1], reason, channel)
             elif cmd == "pp":
-                await self._send_message(channel, "Usage: !pp <feed_id> [reason] (valid reasons: live, liveEnd, update)")
+                await self._send_message(channel, "Usage: !pp <feed_id_or_alias> [reason] (valid reasons: live, liveEnd, update)")
 
         # Private message commands (no ! prefix)
         @self.bot.on_message(
@@ -554,7 +582,7 @@ class PodpingIRCBot:
 
         elif parts[0] == "pp":
             if len(parts) < 2:
-                await self._send_message(nick, "Usage: pp <feed_id> [reason] (valid reasons: live, liveEnd, update)")
+                await self._send_message(nick, "Usage: pp <feed_id_or_alias> [reason] (valid reasons: live, liveEnd, update)")
             else:
                 reason = parts[2] if len(parts) >= 3 else None
                 await self._handle_pp(nick, parts[1], reason, None)
@@ -641,6 +669,10 @@ def load_config(config_path: Path) -> BotConfig:
     # Authorized users (convert to set)
     auth_users = set(data.get("authorized_users", []))
 
+    # Feed aliases (normalize keys to lowercase)
+    raw_aliases = data.get("feed_aliases", {})
+    feed_aliases = {k.lower(): int(v) for k, v in raw_aliases.items()}
+
     return BotConfig(
         # IRC
         irc_host=irc.get("host", "irc.libera.chat"),
@@ -668,6 +700,7 @@ def load_config(config_path: Path) -> BotConfig:
         api_timeout=data.get("api_timeout", 10.0),
         command_timeout=data.get("command_timeout", 30.0),
         user_agent_email=data.get("user_agent_email", "user@email.com"),
+        feed_aliases=feed_aliases,
     )
 
 
