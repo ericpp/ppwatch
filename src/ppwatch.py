@@ -61,8 +61,6 @@ class BotConfig:
 
     # Bot behavior
     command_name: str = "ppwatch"
-    allow_runtime_subscriptions: bool = False  # Default to secure
-    authorized_users: Set[str] = field(default_factory=set)
     message_delay: float = 1.0
 
     # Timeouts for external services
@@ -114,12 +112,6 @@ class PodpingIRCBot:
         if url.startswith('http://'):
             url = 'https://' + url[7:]
         return url
-
-    def _is_authorized(self, nick: str) -> bool:
-        """Check if user is authorized to manage subscriptions."""
-        # Require explicit authorization if runtime subscriptions enabled
-        return (self.config.allow_runtime_subscriptions
-                and nick in self.config.authorized_users)
 
     async def _get_podcast_info(self, url: str) -> Tuple[Optional[str], Optional[int]]:
         """Get podcast title and ID from Podcast Index with timeout."""
@@ -289,8 +281,6 @@ class PodpingIRCBot:
         await self._send_message(nick, f"=== {cmd.upper()} Bot Commands ===")
         await self._send_message(nick, f"  help - Show this help")
         await self._send_message(nick, f"  list - Show all subscriptions")
-        await self._send_message(nick, f"  subscribe <channel> <url> - Subscribe to updates")
-        await self._send_message(nick, f"  unsubscribe <channel> <url> - Unsubscribe")
         await self._send_message(nick, f"  pp <feed_id_or_alias> [reason] - Write podping to Hive")
         await self._send_message(nick, f"    Valid reasons: live, liveEnd, update (default: update)")
         if self.config.feed_aliases:
@@ -319,63 +309,6 @@ class PodpingIRCBot:
                     await self._send_message(nick, f"  {ch}: {len(subs)} feed(s)")
                     for url in sorted(subs):
                         await self._send_message(nick, f"    {url}")
-
-    async def _handle_subscribe(
-        self,
-        nick: str,
-        channel: str,
-        url: str
-    ) -> None:
-        """Subscribe channel to URL."""
-        if not self._is_authorized(nick):
-            await self._send_message(nick, "Unauthorized: subscriptions disabled or user not authorized")
-            logger.warning(f"Unauthorized subscribe attempt by {nick}")
-            return
-
-        # Add to subscriptions
-        if channel not in self.config.channel_subscriptions:
-            self.config.channel_subscriptions[channel] = set()
-
-        if url in self.config.channel_subscriptions[channel]:
-            await self._send_message(nick, f"Already monitoring {url} in {channel}")
-        else:
-            self.config.channel_subscriptions[channel].add(url)
-            # Update normalized cache
-            if channel not in self._normalized_subscriptions:
-                self._normalized_subscriptions[channel] = set()
-            self._normalized_subscriptions[channel].add(self._normalize_url(url))
-
-            await self._send_message(nick, f"Now monitoring {url} in {channel}")
-            logger.info(f"{channel} subscribed to {url} (by {nick})")
-
-    async def _handle_unsubscribe(
-        self,
-        nick: str,
-        channel: str,
-        url: str
-    ) -> None:
-        """Unsubscribe channel from URL."""
-        if not self._is_authorized(nick):
-            await self._send_message(nick, "Unauthorized: subscriptions disabled or user not authorized")
-            logger.warning(f"Unauthorized unsubscribe attempt by {nick}")
-            return
-
-        if channel not in self.config.channel_subscriptions:
-            await self._send_message(nick, f"No subscriptions for {channel}")
-            return
-
-        if url not in self.config.channel_subscriptions[channel]:
-            await self._send_message(nick, f"Not monitoring {url} in {channel}")
-            return
-
-        # Remove from subscriptions
-        self.config.channel_subscriptions[channel].remove(url)
-        # Update normalized cache
-        if channel in self._normalized_subscriptions:
-            self._normalized_subscriptions[channel].discard(self._normalize_url(url))
-
-        await self._send_message(nick, f"Stopped monitoring {url} in {channel}")
-        logger.info(f"{channel} unsubscribed from {url} (by {nick})")
 
     def _resolve_feed_alias(self, feed_id_str: str) -> Tuple[str, Optional[str]]:
         """Resolve a feed alias to its numeric ID.
@@ -550,26 +483,6 @@ class PodpingIRCBot:
         elif parts[0] == "list":
             await self._handle_list(nick, channel)
 
-        elif parts[0] == "subscribe":
-            if channel and len(parts) >= 2:
-                await self._handle_subscribe(nick, channel, parts[1])
-            elif not channel and len(parts) >= 3:
-                await self._handle_subscribe(nick, parts[1], parts[2])
-            elif channel:
-                await self._send_message(nick, "Usage: subscribe <url>")
-            else:
-                await self._send_message(nick, "Usage: subscribe <channel> <url>")
-
-        elif parts[0] == "unsubscribe":
-            if channel and len(parts) >= 2:
-                await self._handle_unsubscribe(nick, channel, parts[1])
-            elif not channel and len(parts) >= 3:
-                await self._handle_unsubscribe(nick, parts[1], parts[2])
-            elif channel:
-                await self._send_message(nick, "Usage: unsubscribe <url>")
-            else:
-                await self._send_message(nick, "Usage: unsubscribe <channel> <url>")
-
         elif parts[0] == "pp":
             if len(parts) < 2:
                 await self._send_message(nick, "Usage: pp <feed_id_or_alias> [reason] (valid reasons: live, liveEnd, update)")
@@ -654,9 +567,6 @@ def load_config(config_path: Path) -> BotConfig:
         for ch, urls in subs.items()
     }
 
-    # Authorized users (convert to set)
-    auth_users = set(data.get("authorized_users", []))
-
     # Feed aliases (normalize keys to lowercase)
     raw_aliases = data.get("feed_aliases", {})
     feed_aliases = {k.lower(): int(v) for k, v in raw_aliases.items()}
@@ -682,8 +592,6 @@ def load_config(config_path: Path) -> BotConfig:
         channel_subscriptions=channel_subs,
         # Bot behavior
         command_name=data.get("command_name", "ppwatch"),
-        allow_runtime_subscriptions=data.get("allow_runtime_subscriptions", False),
-        authorized_users=auth_users,
         message_delay=data.get("message_delay", 1.0),
         api_timeout=data.get("api_timeout", 10.0),
         command_timeout=data.get("command_timeout", 30.0),
