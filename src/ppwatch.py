@@ -33,6 +33,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+VALID_PP_REASONS = {"live", "liveEnd", "update"}
+
 
 @dataclass
 class BotConfig:
@@ -62,16 +64,57 @@ class BotConfig:
     # Bot behavior
     command_name: str = "ppwatch"
     message_delay: float = 1.0
-
-    # Timeouts for external services
-    api_timeout: float = 10.0  # Timeout for API calls
-    command_timeout: float = 30.0  # Max time for command execution
-
-    # User agent for feed fetching
-    user_agent_email: str = "user@email.com"  # Email for User-Agent header
+    api_timeout: float = 10.0
+    user_agent_email: str = "user@email.com"
 
     # Feed aliases: name -> feed_id (e.g. {"bts": 150842})
     feed_aliases: Dict[str, int] = field(default_factory=dict)
+
+    @classmethod
+    def from_dict(cls, data: dict) -> 'BotConfig':
+        """Build config from a parsed JSON dict.
+
+        Only keys present in the data override the dataclass defaults.
+        """
+        irc = data.get("irc", {})
+        pi = data.get("podcast_index", {})
+        pw = data.get("podping_writer", {})
+
+        kwargs = {}
+        for field_name, section, key in [
+            ("irc_host", irc, "host"),
+            ("irc_port", irc, "port"),
+            ("irc_nick", irc, "nick"),
+            ("irc_user", irc, "user"),
+            ("irc_realname", irc, "realname"),
+            ("irc_secure", irc, "secure"),
+            ("irc_nickserv_password", irc, "nickserv_password"),
+            ("podcast_index_key", pi, "api_key"),
+            ("podcast_index_secret", pi, "api_secret"),
+            ("hive_account", pw, "hive_account"),
+            ("hive_posting_key", pw, "hive_posting_key"),
+            ("hive_nodes", pw, "hive_nodes"),
+            ("hive_dry_run", pw, "dry_run"),
+            ("command_name", data, "command_name"),
+            ("message_delay", data, "message_delay"),
+            ("api_timeout", data, "api_timeout"),
+            ("user_agent_email", data, "user_agent_email"),
+        ]:
+            if key in section:
+                kwargs[field_name] = section[key]
+
+        subs = data.get("channel_subscriptions", {})
+        if subs:
+            kwargs["channel_subscriptions"] = {
+                ch: set(urls if isinstance(urls, list) else [urls])
+                for ch, urls in subs.items()
+            }
+
+        raw_aliases = data.get("feed_aliases", {})
+        if raw_aliases:
+            kwargs["feed_aliases"] = {k.lower(): int(v) for k, v in raw_aliases.items()}
+
+        return cls(**kwargs)
 
 
 class PodpingIRCBot:
@@ -88,10 +131,10 @@ class PodpingIRCBot:
             nick=config.irc_nick,
         )
 
-        # Normalize all subscribed URLs once at startup
         self._normalized_subscriptions = self._normalize_subscriptions()
+        self._joined_channels: Set[str] = set()
+        self._http_client: Optional[httpx.AsyncClient] = None
 
-        # Optional clients
         self.podcast_index: Optional[PodcastIndexClient] = None
         self.podping_writer: Optional[PodpingWriter] = None
         self.watcher: Optional[PodpingWatcher] = None
@@ -100,10 +143,10 @@ class PodpingIRCBot:
 
     def _normalize_subscriptions(self) -> Dict[str, Set[str]]:
         """Normalize all subscription URLs for faster matching."""
-        normalized = {}
-        for channel, urls in self.config.channel_subscriptions.items():
-            normalized[channel] = {self._normalize_url(url) for url in urls}
-        return normalized
+        return {
+            channel: {self._normalize_url(url) for url in urls}
+            for channel, urls in self.config.channel_subscriptions.items()
+        }
 
     @staticmethod
     def _normalize_url(url: str) -> str:
@@ -112,6 +155,19 @@ class PodpingIRCBot:
         if url.startswith('http://'):
             url = 'https://' + url[7:]
         return url
+
+    async def _get_http_client(self) -> httpx.AsyncClient:
+        if self._http_client is None:
+            self._http_client = httpx.AsyncClient(
+                follow_redirects=True,
+                headers={"User-Agent": f"PodPing Watch/{self.config.user_agent_email}"}
+            )
+        return self._http_client
+
+    async def _close_http_client(self) -> None:
+        if self._http_client:
+            await self._http_client.aclose()
+            self._http_client = None
 
     async def _get_podcast_info(self, url: str) -> Tuple[Optional[str], Optional[int]]:
         """Get podcast title and ID from Podcast Index with timeout."""
@@ -131,34 +187,24 @@ class PodpingIRCBot:
             return None, None
 
     async def _check_live_item_status(self, feed_url: str) -> Tuple[Optional[bool], Optional[str]]:
-        """
-        Fetch feed and check if any liveItem tags have status="live".
-        Returns (True if live, False if not live, None if error/not found, error_message if error).
-        """
+        """Fetch feed and check if any liveItem tags have status="live".
+        Returns (is_live, error_message)."""
         try:
+            client = await self._get_http_client()
             async with asyncio_timeout(self.config.api_timeout):
-                async with httpx.AsyncClient(
-                    follow_redirects=True,
-                    headers={"User-Agent": f"PodPing Watch/{self.config.user_agent_email}"}
-                ) as client:
-                    response = await client.get(feed_url)
-                    response.raise_for_status()
+                response = await client.get(feed_url)
+                response.raise_for_status()
 
-                    # Parse XML
-                    root = ET.fromstring(response.text)
+                root = ET.fromstring(response.text)
 
-                    # Look for any liveItem tag with status="live"
-                    # people seem to use different podcast xmlns urls so im just matching everything
-                    live_items = root.findall('.//{*}liveItem')
+                # Match all xmlns variants for liveItem
+                for live_item in root.findall('.//{*}liveItem'):
+                    if live_item.get('status', '').lower() == 'live':
+                        logger.debug(f"Found liveItem with status='live' in {feed_url}")
+                        return True, None
 
-                    for live_item in live_items:
-                        status = live_item.get('status', '').lower()
-                        if status == 'live':
-                            logger.debug(f"Found liveItem with status='live' in {feed_url}")
-                            return True, None
-
-                    logger.debug(f"No live items found in {feed_url}")
-                    return False, None
+                logger.debug(f"No live items found in {feed_url}")
+                return False, None
 
         except asyncio.TimeoutError:
             error_msg = f"Timeout fetching feed {feed_url}"
@@ -166,43 +212,39 @@ class PodpingIRCBot:
             return None, error_msg
         except httpx.HTTPStatusError as e:
             error_msg = f"HTTP {e.response.status_code} {e.response.reason_phrase} fetching feed {feed_url}"
-            logger.warning(f"Error checking live item status for {feed_url}: {error_msg}")
+            logger.warning(error_msg)
             return None, error_msg
         except httpx.RequestError as e:
-            error_msg = f"Request error fetching feed {feed_url}: {str(e)}"
-            logger.warning(f"Error checking live item status for {feed_url}: {error_msg}")
+            error_msg = f"Request error fetching feed {feed_url}: {e}"
+            logger.warning(error_msg)
             return None, error_msg
         except Exception as e:
-            error_msg = f"Error checking live item status for {feed_url}: {str(e)}"
+            error_msg = f"Error checking live item status for {feed_url}: {e}"
             logger.warning(error_msg)
             return None, error_msg
 
-    async def _verify_live_status(self, url: str, reason: str) -> Tuple[bool, str]:
-        """
-        Verify that the feed's liveItem status matches the podping reason.
-        Returns (is_valid, message).
-        """
+    async def _verify_live_status(self, url: str, reason: str) -> Tuple[bool, Optional[str]]:
+        """Verify that the feed's liveItem status matches the podping reason.
+        Returns (is_valid, message)."""
         if reason not in ('live', 'liveEnd'):
             return True, None
 
         is_live, error_msg = await self._check_live_item_status(url)
-        error = None
 
         if is_live is None:
+            warning = "Warning: Could not verify liveItem status"
             if error_msg:
-                warning = f"Warning: Could not verify liveItem status - {error_msg}"
-            else:
-                warning = "Warning: Could not verify liveItem status"
+                warning += f" - {error_msg}"
             logger.warning(f"{warning} for {url} (reason: {reason})")
-            return True, warning  # Allow it but warn
+            return True, warning
 
-        elif reason == 'live' and not is_live:
-            error = f"Error: Feed has no liveItem with status='live' but reason is 'live'"
+        if reason == 'live' and not is_live:
+            error = "Error: Feed has no liveItem with status='live' but reason is 'live'"
+            logger.error(f"{error} for {url}")
+            return False, error
 
-        elif reason == 'liveEnd' and is_live:
-            error = f"Error: Feed has liveItem with status='live' but reason is 'liveEnd'"
-
-        if error:
+        if reason == 'liveEnd' and is_live:
+            error = "Error: Feed has liveItem with status='live' but reason is 'liveEnd'"
             logger.error(f"{error} for {url}")
             return False, error
 
@@ -228,7 +270,6 @@ class PodpingIRCBot:
             f"Received podping with {len(podping_data.urls)} URL(s): {'; '.join(podping_data.urls)}"
         )
 
-        # Group URLs by interested channel
         channel_urls: Dict[str, List[str]] = defaultdict(list)
         for url in podping_data.urls:
             normalized = self._normalize_url(url)
@@ -236,36 +277,22 @@ class PodpingIRCBot:
                 if normalized in urls:
                     channel_urls[channel].append(url)
 
-        # Send messages to interested channels
         for channel, urls in channel_urls.items():
-            # Find actual joined channel name (case-insensitive)
-            channel_lower = channel.lower()
-            target = None
-            for ch in self.bot._channels:
-                if ch.lower() == channel_lower:
-                    target = ch
-                    break
-
-            if not target:
+            if channel not in self._joined_channels:
                 logger.warning(f"Not in channel {channel}, skipping notifications")
                 continue
 
             for url in urls:
-                # First, announce the podping
                 msg = await self._format_podping_message(
-                    url,
-                    podping_data.reason,
-                    podping_data.trx_id
+                    url, podping_data.reason, podping_data.trx_id
                 )
-                await self.bot.message(target, msg)
+                await self._send_message(channel, msg)
                 await asyncio.sleep(self.config.message_delay)
 
-                # Then verify live/liveEnd status if applicable
                 if podping_data.reason in ('live', 'liveEnd'):
                     is_valid, message = await self._verify_live_status(url, podping_data.reason)
                     if not is_valid or message:
-                        # Send follow-up message with status check result
-                        await self.bot.message(target, f"  → {message}")
+                        await self._send_message(channel, f"  → {message}")
                         await asyncio.sleep(self.config.message_delay)
 
     async def _send_message(self, nick: str, text: str) -> None:
@@ -318,13 +345,35 @@ class PodpingIRCBot:
             return str(self.config.feed_aliases[alias_key]), feed_id_str
         return feed_id_str, None
 
+    async def _write_podping(self, feed_id: int, reason: str, nick: str) -> Tuple[str, str, str]:
+        """Look up feed and write podping to Hive.
+        Returns (result_message, feed_url, reason).
+        Raises ValueError if the feed is not found."""
+        async with asyncio_timeout(self.config.api_timeout):
+            metadata = await self.podcast_index.lookup_by_feed_id(feed_id)
+
+        if not metadata:
+            raise ValueError(f"Feed ID {feed_id} not found in Podcast Index")
+
+        logger.info(f"Writing podping for feed {feed_id}: {metadata.url} (reason: {reason})")
+        result = await self.podping_writer.post(metadata.url, reason=reason)
+        rc_percent = await self.podping_writer.get_credits()
+        rc_used = 100 - rc_percent if rc_percent is not None else None
+
+        tx_id = result["tx_id"]
+        tx_url = f"https://hive.ausbit.dev/tx/{tx_id}"
+        rc_info = f" rc used: {rc_used:.1f}%" if rc_used is not None else ""
+
+        msg = f"Podping sent: {metadata.title} {metadata.url} ({reason}) (tx: {tx_url}{rc_info})"
+        logger.info(f"Podping sent by {nick} for feed {feed_id}: tx {tx_id} (reason: {reason}){rc_info}")
+
+        return msg, metadata.url, reason
+
     async def _handle_pp(self, nick: str, feed_id_str: str, reason: Optional[str] = None, channel: Optional[str] = None) -> None:
-        """Handle !pp command with timeout and error handling."""
-        target = channel if channel else nick
+        """Handle !pp command."""
+        target = channel or nick
 
-        # Resolve alias before anything else
         feed_id_str, alias_used = self._resolve_feed_alias(feed_id_str)
-
         if alias_used:
             await self._send_message(target, f"Sending podping for {alias_used} (feed ID {feed_id_str})...")
         else:
@@ -344,66 +393,37 @@ class PodpingIRCBot:
             await self._send_message(target, f"Error: Invalid feed ID '{feed_id_str}' (must be a number or alias)")
             return
 
-        # Validate reason if provided
-        valid_reasons = {"live", "liveEnd", "update"}
-        if reason and reason not in valid_reasons:
-            await self._send_message(target, f"Error: Invalid reason '{reason}'. Valid reasons are: {', '.join(sorted(valid_reasons))}")
+        if reason and reason not in VALID_PP_REASONS:
+            await self._send_message(target, f"Error: Invalid reason '{reason}'. Valid reasons are: {', '.join(sorted(VALID_PP_REASONS))}")
             return
 
         try:
-            # Look up feed with timeout
-            logger.info(f"Looking up feed {feed_id} for {nick}")
-            async with asyncio_timeout(self.config.api_timeout):
-                metadata = await self.podcast_index.lookup_by_feed_id(feed_id)
-
-            if not metadata:
-                await self._send_message(target, f"Error: Feed ID {feed_id} not found in Podcast Index")
-                return
-
-            # Write podping with timeout
-            reason = reason or "update"  # Ensure reason is not None
-            logger.info(f"Writing podping for feed {feed_id}: {metadata.url} (reason: {reason})")
-            result = await self.podping_writer.post(metadata.url, reason=reason)
-            rc_percent = await self.podping_writer.get_credits()
-            rc_used = 100 - rc_percent if rc_percent is not None else None
-
-            tx_id = result["tx_id"]
-            tx_url = f"https://hive.ausbit.dev/tx/{tx_id}"
-            rc_info = f" rc used: {rc_used:.1f}%" if rc_used is not None else ""
-
-            msg = f"Podping sent: {metadata.title} {metadata.url} ({reason}) (tx: {tx_url}{rc_info})"
-            logger.info(f"Podping sent by {nick} for feed {feed_id}: tx {tx_id} (reason: {reason}){rc_info}")
-
+            msg, feed_url, reason = await self._write_podping(feed_id, reason or "update", nick)
             await self._send_message(target, msg)
 
-            # Verify live/liveEnd status after sending (if applicable)
             if reason in ('live', 'liveEnd'):
-                is_valid, message = await self._verify_live_status(metadata.url, reason)
+                is_valid, message = await self._verify_live_status(feed_url, reason)
                 if not is_valid or message:
                     await self._send_message(target, f"  → {message}")
 
+        except ValueError as e:
+            await self._send_message(target, f"Error: {e}")
+
         except asyncio.TimeoutError:
-            error_msg = f"Error: Timeout writing podping for feed {feed_id} (try again later)"
             logger.error(f"Timeout in pp command by {nick} for feed {feed_id}")
-            await self._send_message(target, error_msg)
+            await self._send_message(target, f"Error: Timeout writing podping for feed {feed_id} (try again later)")
 
         except PodpingNetworkError as e:
-            # Network/blockchain errors are expected and transient
-            error_msg = f"Error: Hive network error for feed {feed_id} - please try again in a moment"
             logger.warning(f"Network error in pp command by {nick} for feed {feed_id}: {e}")
-            await self._send_message(target, error_msg)
+            await self._send_message(target, f"Error: Hive network error for feed {feed_id} - please try again in a moment")
 
         except PodpingError as e:
-            # Other podping errors (validation, etc.)
-            error_msg = f"Error: Failed to write podping for feed {feed_id}: {str(e)}"
             logger.warning(f"Podping error in pp command by {nick} for feed {feed_id}: {e}")
-            await self._send_message(target, error_msg)
+            await self._send_message(target, f"Error: Failed to write podping for feed {feed_id}: {e}")
 
         except Exception as e:
-            # Unexpected errors - log with full traceback
-            error_msg = f"Error: Unexpected error writing podping for feed {feed_id}: {str(e)}"
             logger.error(f"Unexpected error in pp command by {nick}: {e}", exc_info=True)
-            await self._send_message(target, error_msg)
+            await self._send_message(target, f"Error: Unexpected error writing podping for feed {feed_id}: {e}")
 
     def _setup_handlers(self) -> None:
         """Setup IRC event handlers."""
@@ -425,10 +445,10 @@ class PodpingIRCBot:
                 )
                 await nickserv_ok
 
-            # Join subscribed channels
             for channel in self.config.channel_subscriptions:
                 logger.info(f"Joining {channel}")
                 await self.bot.join(channel)
+                self._joined_channels.add(channel)
 
         # Channel commands: !ppwatch and !pp
         @self.bot.on_message(
@@ -529,18 +549,17 @@ class PodpingIRCBot:
 
     async def run(self) -> None:
         """Run the bot."""
-        # Start watcher as background task
         watcher_task = asyncio.create_task(self._start_watcher())
 
         try:
             await self.bot.run()
         finally:
-            # Cancel watcher
             watcher_task.cancel()
             try:
                 await watcher_task
             except asyncio.CancelledError:
                 pass
+            await self._close_http_client()
 
 
 def load_config(config_path: Path) -> BotConfig:
@@ -549,55 +568,7 @@ def load_config(config_path: Path) -> BotConfig:
         raise FileNotFoundError(f"Config file not found: {config_path}")
 
     with open(config_path) as f:
-        data = json.load(f)
-
-    # IRC settings
-    irc = data.get("irc", {})
-
-    # Podcast Index settings
-    pi = data.get("podcast_index", {})
-
-    # Podping writer settings
-    pw = data.get("podping_writer", {})
-
-    # Channel subscriptions (convert lists to sets)
-    subs = data.get("channel_subscriptions", {})
-    channel_subs = {
-        ch: set(urls if isinstance(urls, list) else [urls])
-        for ch, urls in subs.items()
-    }
-
-    # Feed aliases (normalize keys to lowercase)
-    raw_aliases = data.get("feed_aliases", {})
-    feed_aliases = {k.lower(): int(v) for k, v in raw_aliases.items()}
-
-    return BotConfig(
-        # IRC
-        irc_host=irc.get("host", "irc.libera.chat"),
-        irc_port=irc.get("port", 6667),
-        irc_nick=irc.get("nick", "podping-bot"),
-        irc_user=irc.get("user", "podping"),
-        irc_realname=irc.get("realname", "Podping RSS Update Bot"),
-        irc_secure=irc.get("secure", False),
-        irc_nickserv_password=irc.get("nickserv_password"),
-        # Podcast Index
-        podcast_index_key=pi.get("api_key", ""),
-        podcast_index_secret=pi.get("api_secret", ""),
-        # Podping writer
-        hive_account=pw.get("hive_account", ""),
-        hive_posting_key=pw.get("hive_posting_key", ""),
-        hive_nodes=pw.get("hive_nodes", []),
-        hive_dry_run=pw.get("dry_run", True),
-        # Subscriptions
-        channel_subscriptions=channel_subs,
-        # Bot behavior
-        command_name=data.get("command_name", "ppwatch"),
-        message_delay=data.get("message_delay", 1.0),
-        api_timeout=data.get("api_timeout", 10.0),
-        command_timeout=data.get("command_timeout", 30.0),
-        user_agent_email=data.get("user_agent_email", "user@email.com"),
-        feed_aliases=feed_aliases,
-    )
+        return BotConfig.from_dict(json.load(f))
 
 
 async def main() -> None:
