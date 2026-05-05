@@ -10,6 +10,7 @@ import logging
 import re
 from collections import defaultdict
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
 from xml.etree import ElementTree as ET
@@ -186,8 +187,32 @@ class PodpingIRCBot:
             logger.debug(f"Failed to fetch metadata for {url}: {e}")
             return None, None
 
+    @staticmethod
+    def _find_closest_live_item(live_items: list) -> Optional[ET.Element]:
+        """Find the liveItem with start time closest to now."""
+        now = datetime.now(timezone.utc)
+        best = None
+        best_delta = None
+
+        for item in live_items:
+            start_str = item.get('start')
+            if not start_str:
+                continue
+            try:
+                start_dt = datetime.fromisoformat(start_str.replace('Z', '+00:00'))
+                delta = abs((start_dt - now).total_seconds())
+                if best_delta is None or delta < best_delta:
+                    best = item
+                    best_delta = delta
+            except (ValueError, TypeError):
+                continue
+
+        if best is None and live_items:
+            return live_items[0]
+        return best
+
     async def _check_live_item_status(self, feed_url: str) -> Tuple[Optional[bool], Optional[str]]:
-        """Fetch feed and check if any liveItem tags have status="live".
+        """Fetch feed and check if the liveItem closest to now has status="live".
         Returns (is_live, error_message)."""
         try:
             client = await self._get_http_client()
@@ -197,14 +222,22 @@ class PodpingIRCBot:
 
                 root = ET.fromstring(response.text)
 
-                # Match all xmlns variants for liveItem
-                for live_item in root.findall('.//{*}liveItem'):
-                    if live_item.get('status', '').lower() == 'live':
-                        logger.debug(f"Found liveItem with status='live' in {feed_url}")
-                        return True, None
+                live_items = root.findall('.//{*}liveItem')
+                if not live_items:
+                    logger.debug(f"No liveItem elements found in {feed_url}")
+                    return False, None
 
-                logger.debug(f"No live items found in {feed_url}")
-                return False, None
+                closest = self._find_closest_live_item(live_items)
+                if closest is None:
+                    logger.debug(f"No liveItem elements found in {feed_url}")
+                    return False, None
+
+                is_live = closest.get('status', '').lower() == 'live'
+                logger.debug(
+                    f"Closest liveItem in {feed_url} has status='{closest.get('status')}' "
+                    f"(start={closest.get('start')})"
+                )
+                return is_live, None
 
         except asyncio.TimeoutError:
             error_msg = f"Timeout fetching feed {feed_url}"
@@ -229,6 +262,7 @@ class PodpingIRCBot:
         if reason not in ('live', 'liveEnd'):
             return True, None
 
+        await asyncio.sleep(5)
         is_live, error_msg = await self._check_live_item_status(url)
 
         if is_live is None:
