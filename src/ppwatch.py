@@ -300,16 +300,22 @@ class PodpingIRCBot:
 
     async def _handle_podping(self, podping_data) -> None:
         """Handle incoming podping data."""
-        logger.debug(
-            f"Received podping with {len(podping_data.urls)} URL(s): {'; '.join(podping_data.urls)}"
-        )
-
         channel_urls: Dict[str, List[str]] = defaultdict(list)
         for url in podping_data.urls:
             normalized = self._normalize_url(url)
             for channel, urls in self._normalized_subscriptions.items():
                 if normalized in urls:
                     channel_urls[channel].append(url)
+
+        if not channel_urls:
+            logger.debug(
+                f"Unrelated podping with {len(podping_data.urls)} URL(s) {'; '.join(podping_data.urls)}"
+            )
+            return
+
+        logger.info(
+            f"Received podping with {len(podping_data.urls)} URL(s): {'; '.join(podping_data.urls)}"
+        )
 
         for channel, urls in channel_urls.items():
             if channel not in self._joined_channels:
