@@ -562,15 +562,20 @@ class PodpingIRCBot:
         else:
             logger.warning("Podcast Index not configured - metadata unavailable")
 
-        # Initialize Podping writer
+        # Initialize Podping writer (in a worker thread: lighthive node selection
+        # uses run_until_complete and cannot run inside our asyncio loop)
         if self.config.hive_account and self.config.hive_posting_key:
             try:
-                self.podping_writer = PodpingWriter(
-                    account=self.config.hive_account,
-                    posting_key=self.config.hive_posting_key,
-                    nodes=self.config.hive_nodes,
-                    dry_run=self.config.hive_dry_run
-                )
+                def create_writer() -> PodpingWriter:
+                    return PodpingWriter(
+                        account=self.config.hive_account,
+                        posting_key=self.config.hive_posting_key,
+                        nodes=self.config.hive_nodes,
+                        dry_run=self.config.hive_dry_run,
+                    )
+
+                loop = asyncio.get_running_loop()
+                self.podping_writer = await loop.run_in_executor(None, create_writer)
                 logger.info(f"Podping writer initialized (dry_run={self.config.hive_dry_run})")
             except Exception as e:
                 logger.error(f"Error initializing podping writer: {e}")
