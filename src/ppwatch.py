@@ -29,7 +29,7 @@ except ImportError:
 
 # Setup logging
 logging.basicConfig(
-    level=logging.DEBUG,
+    level=logging.INFO,
     format="[%(asctime)s] %(levelname)s: %(filename)s:%(funcName)s(%(lineno)s): %(message)s"
 )
 logger = logging.getLogger(__name__)
@@ -67,6 +67,7 @@ class BotConfig:
     message_delay: float = 1.0
     api_timeout: float = 10.0
     user_agent_email: str = "user@email.com"
+    debug_logging: bool = True
 
     # Feed aliases: name -> feed_id (e.g. {"bts": 150842})
     feed_aliases: Dict[str, int] = field(default_factory=dict)
@@ -100,6 +101,7 @@ class BotConfig:
             ("message_delay", data, "message_delay"),
             ("api_timeout", data, "api_timeout"),
             ("user_agent_email", data, "user_agent_email"),
+            ("debug_logging", data, "debug_logging"),
         ]:
             if key in section:
                 kwargs[field_name] = section[key]
@@ -659,6 +661,8 @@ async def main() -> None:
 
     try:
         config = load_config(args.config)
+        if config.debug_logging:
+            logging.getLogger().setLevel(logging.DEBUG)
         bot = PodpingIRCBot(config)
         await bot.run()
     except KeyboardInterrupt:
