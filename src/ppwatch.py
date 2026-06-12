@@ -356,8 +356,9 @@ class PodpingIRCBot:
         await self._send_message(nick, f"=== {cmd.upper()} Bot Commands ===")
         await self._send_message(nick, f"  help - Show this help")
         await self._send_message(nick, f"  list - Show all subscriptions")
-        await self._send_message(nick, f"  pp <feed_id_or_alias> [reason] - Write podping to Hive")
-        await self._send_message(nick, f"    Valid reasons: live, liveEnd, update (default: update)")
+        await self._send_message(nick, f"  pp <feed_id_or_alias> - Send a podping notification for an updated feed")
+        await self._send_message(nick, f"  pplive <feed_id_or_alias> - Send a podping notification for a live feed")
+        await self._send_message(nick, f"  ppend <feed_id_or_alias> - Send a podping notification for an ended live feed")
         if self.config.feed_aliases:
             aliases = ", ".join(f"{name}={fid}" for name, fid in sorted(self.config.feed_aliases.items()))
             await self._send_message(nick, f"    Aliases: {aliases}")
@@ -498,12 +499,13 @@ class PodpingIRCBot:
                 await self.bot.join(channel)
                 self._joined_channels.add(channel)
 
-        # Channel commands: !ppwatch and !pp
+        # Channel commands: !pp, !pplive, !ppend
         @self.bot.on_message(
             matcher=lambda msg: (
                 isinstance(msg.recipient, Channel)
-                and (msg.text.startswith(f"!{self.config.command_name}")
-                     or msg.text.startswith("!pp"))
+                and (msg.text.startswith("!pp")
+                     or msg.text.startswith("!pplive")
+                     or msg.text.startswith("!ppend"))
             )
         )
         async def on_channel_command(message):
@@ -517,14 +519,8 @@ class PodpingIRCBot:
             channel = message.recipient.name
             cmd = parts[0]
 
-            # Route to appropriate handler
-            if cmd == self.config.command_name:
-                await self._route_ppwatch_command(nick, parts[1:], channel)
-            elif cmd == "pp" and len(parts) >= 2:
-                reason = parts[2] if len(parts) >= 3 else None
-                await self._handle_pp(nick, parts[1], reason, channel)
-            elif cmd == "pp":
-                await self._send_message(channel, "Usage: !pp <feed_id_or_alias> [reason] (valid reasons: live, liveEnd, update)")
+            if cmd in ("pp", "pplive", "ppend"):
+                await self._route_ppwatch_command(channel, nick, parts, channel)
 
         # Private message commands (no ! prefix)
         @self.bot.on_message(
@@ -536,10 +532,11 @@ class PodpingIRCBot:
                 return
 
             nick = message.sender.name
-            await self._route_ppwatch_command(nick, parts, channel=None)
+            await self._route_ppwatch_command(nick, nick, parts, channel=None)
 
     async def _route_ppwatch_command(
         self,
+        target: str,
         nick: str,
         parts: List[str],
         channel: Optional[str]
@@ -553,10 +550,21 @@ class PodpingIRCBot:
 
         elif parts[0] == "pp":
             if len(parts) < 2:
-                await self._send_message(nick, "Usage: pp <feed_id_or_alias> [reason] (valid reasons: live, liveEnd, update)")
+                await self._send_message(target, "Usage: !pp <feed_id_or_alias>")
             else:
-                reason = parts[2] if len(parts) >= 3 else None
-                await self._handle_pp(nick, parts[1], reason, None)
+                await self._handle_pp(nick, parts[1], "update", target)
+
+        elif parts[0] == "pplive":
+            if len(parts) < 2:
+                await self._send_message(target, "Usage: !pplive <feed_id_or_alias>")
+            else:
+                await self._handle_pp(nick, parts[1], "live", target)
+
+        elif parts[0] == "ppend":
+            if len(parts) < 2:
+                await self._send_message(target, "Usage: !ppend <feed_id_or_alias>")
+            else:
+                await self._handle_pp(nick, parts[1], "liveEnd", target)
 
     async def _start_watcher(self) -> None:
         """Start the podping watcher."""
