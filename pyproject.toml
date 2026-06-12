@@ -26,6 +26,6 @@ dependencies = [
 packages = ["."]
 
 [tool.uv.sources]
-asif = { path = "asif", editable = true }
+asif = { git = "https://github.com/ericpp/asif.git" }
 pypodping = { git = "https://github.com/ericpp/pypodping.git" }
 podcast_index = { path = "podcast_index" }
