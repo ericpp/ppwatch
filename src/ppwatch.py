@@ -534,6 +534,9 @@ class PodpingIRCBot:
                 return
 
             nick = message.sender.name
+            if not nick:
+                return
+
             await self._route_ppwatch_command(nick, nick, parts, channel=None)
 
     async def _route_ppwatch_command(
