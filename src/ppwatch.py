@@ -121,16 +121,11 @@ class BotConfig:
 class PodpingIRCBot:
     """IRC bot that monitors podping and posts updates to channels."""
 
+    RECONNECT_DELAY = 30
+    READ_TIMEOUT = 300
+
     def __init__(self, config: BotConfig):
         self.config = config
-        self.bot = Client(
-            host=config.irc_host,
-            port=config.irc_port,
-            secure=config.irc_secure,
-            user=config.irc_user,
-            realname=config.irc_realname,
-            nick=config.irc_nick,
-        )
 
         self._normalized_subscriptions = self._normalize_subscriptions()
         self._joined_channels: Set[str] = set()
@@ -140,6 +135,19 @@ class PodpingIRCBot:
         self.podping_writer: Optional[PodpingWriter] = None
         self.watcher: Optional[PodpingWatcher] = None
 
+        self._create_bot()
+
+    def _create_bot(self) -> None:
+        """Create (or recreate) the IRC client and register handlers."""
+        self.bot = Client(
+            host=self.config.irc_host,
+            port=self.config.irc_port,
+            secure=self.config.irc_secure,
+            user=self.config.irc_user,
+            realname=self.config.irc_realname,
+            nick=self.config.irc_nick,
+            read_timeout=self.READ_TIMEOUT,
+        )
         self._setup_handlers()
 
     def _normalize_subscriptions(self) -> Dict[str, Set[str]]:
@@ -593,11 +601,23 @@ class PodpingIRCBot:
         await self.watcher.start()
 
     async def run(self) -> None:
-        """Run the bot."""
+        """Run the bot with automatic reconnection."""
         watcher_task = asyncio.create_task(self._start_watcher())
 
         try:
-            await self.bot.run()
+            while True:
+                try:
+                    await self.bot.run()
+                    logger.warning("IRC connection closed")
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:
+                    logger.error(f"IRC connection error: {e}")
+
+                self._joined_channels.clear()
+                logger.info(f"Reconnecting in {self.RECONNECT_DELAY} seconds...")
+                await asyncio.sleep(self.RECONNECT_DELAY)
+                self._create_bot()
         finally:
             watcher_task.cancel()
             try:

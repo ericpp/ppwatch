@@ -117,7 +117,7 @@ class Client(metaclass=LoggerMetaClass):
 
     def __init__(self, host: str, port: int, nick: str="TheBot", user: str="bot",
                  realname: str="The Bot", secure: bool=False, encoding: str="utf-8",
-                 password: str=None):
+                 password: str=None, read_timeout: float=None):
         self.host = host
         self.port = port
         self.secure = secure
@@ -126,6 +126,7 @@ class Client(metaclass=LoggerMetaClass):
         self.realname = realname
         self.encoding = encoding
         self.password = password
+        self.read_timeout = read_timeout
 
         self._on_connected_handlers = []
         self._on_message_handlers = []
@@ -391,7 +392,12 @@ class Client(metaclass=LoggerMetaClass):
         await self._send(cc.PRIVMSG if not notice else cc.NOTICE, recipient, text)
 
     async def _get_message(self) -> IrcMessage:
-        line = await self._reader.readline()
+        if self.read_timeout:
+            line = await asyncio.wait_for(
+                self._reader.readline(), timeout=self.read_timeout
+            )
+        else:
+            line = await self._reader.readline()
         line = line.decode(self.encoding).strip("\r\n")
 
         if not line and self._reader.at_eof():
@@ -421,6 +427,12 @@ class Client(metaclass=LoggerMetaClass):
 
             try:
                 msg = await self._get_message()
+            except asyncio.TimeoutError:
+                self._log.warning(
+                    "No data received for %s seconds, assuming dead connection",
+                    self.read_timeout
+                )
+                break
             except:
                 self._log.exception("Error during receiving")
                 raise
