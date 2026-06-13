@@ -1790,7 +1790,7 @@ wheels = [
 [[package]]
 name = "pypodping"
 version = "1.0.7"
-source = { git = "https://github.com/ericpp/pypodping.git#8a8f160c3eb6641f600bc649a58b471ae0e70e93" }
+source = { git = "https://github.com/ericpp/pypodping.git#2a64e23af0db6e6ec3bca3b187605b04203883e7" }
 dependencies = [
     { name = "aiohttp", version = "3.10.11", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.9'" },
     { name = "aiohttp", version = "3.13.5", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.9.*'" },
