@@ -517,6 +517,9 @@ class PodpingIRCBot:
             if not parts:
                 return
 
+            if not message.sender or not message.recipient:
+                return
+
             nick = message.sender.name
             channel = message.recipient.name
             cmd = parts[0]
@@ -533,10 +536,10 @@ class PodpingIRCBot:
             if not parts:
                 return
 
-            nick = message.sender.name
-            if not nick:
+            if not message.sender:
                 return
 
+            nick = message.sender.name
             await self._route_ppwatch_command(nick, nick, parts, channel=None)
 
     async def _route_ppwatch_command(
