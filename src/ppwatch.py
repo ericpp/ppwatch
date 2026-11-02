@@ -125,6 +125,7 @@ class PodpingIRCBot:
 
     RECONNECT_DELAY = 30
     READ_TIMEOUT = 300
+    IDENTIFY_TIMEOUT = 30
 
     def __init__(self, config: BotConfig):
         self.config = config
@@ -483,6 +484,16 @@ class PodpingIRCBot:
         async def on_connected():
             logger.info(f"Connected to {self.config.irc_host}")
 
+            if self.bot.nick != self.config.irc_nick:
+                logger.error(
+                    "Registered nick %s is still taken (connected as %s); reconnecting",
+                    self.config.irc_nick,
+                    self.bot.nick,
+                )
+                raise RuntimeError(
+                    f"registered nick {self.config.irc_nick} is still taken"
+                )
+
             # Identify with NickServ if configured
             if self.config.irc_nickserv_password:
                 logger.info("Identifying with NickServ...")
@@ -494,7 +505,11 @@ class PodpingIRCBot:
                     "NickServ",
                     f"IDENTIFY {self.config.irc_nickserv_password}"
                 )
-                await nickserv_ok
+                try:
+                    await asyncio.wait_for(nickserv_ok, self.IDENTIFY_TIMEOUT)
+                except asyncio.TimeoutError:
+                    logger.error("NickServ identify timed out")
+                    raise
 
             for channel in self.config.channel_subscriptions:
                 logger.info(f"Joining {channel}")
