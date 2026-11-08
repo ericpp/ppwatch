@@ -1,0 +1,9 @@
+# Build artifacts
+ppwatch
+ppwatch-linux-amd64
+ppwatch.exe
+
+# Local configuration (contains credentials)
+irc_bot_config.json
+my_config.json
+*.log

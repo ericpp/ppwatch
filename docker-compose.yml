@@ -1,0 +1,30 @@
+version: '3.8'
+
+services:
+  ppwatch:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ericpp/ppwatch
+    restart: unless-stopped
+    environment:
+      # Configuration file path inside the container (can be overridden)
+      - CONFIG_FILE=/app/config.json
+    volumes:
+      # Mount config file for easy editing
+      - ./irc_bot_config.json:/app/config.json:ro
+    networks:
+      - podping-network
+    # Resource limits
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+          cpus: '0.25'
+        reservations:
+          memory: 64M
+          cpus: '0.1'
+
+networks:
+  podping-network:
+    driver: bridge
