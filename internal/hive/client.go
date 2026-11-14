@@ -94,6 +94,17 @@ func (c *HiveClient) currentNode() string {
 	return c.nodes[c.nodeIdx]
 }
 
+// pauseBeforeRetry waits briefly before trying the next node, returning
+// immediately when the context is cancelled.
+func (c *HiveClient) pauseBeforeRetry(ctx context.Context) error {
+	select {
+	case <-ctx.Done():
+		return NewConnectionError("all nodes failed. Last error: %v", ctx.Err())
+	case <-time.After(100 * time.Millisecond):
+		return nil
+	}
+}
+
 // formatRPCError builds a readable message from an RPC error object,
 // including code and nested error details when present.
 func formatRPCError(e *rpcError) string {
@@ -161,10 +172,8 @@ func (c *HiveClient) RPCCall(ctx context.Context, method string, params []any) (
 			lastErr = err
 			log.Printf("Node %s failed: %v", node, err)
 			c.nextNode()
-			select {
-			case <-ctx.Done():
-				return nil, NewConnectionError("all nodes failed. Last error: %v", ctx.Err())
-			case <-time.After(100 * time.Millisecond):
+			if err := c.pauseBeforeRetry(ctx); err != nil {
+				return nil, err
 			}
 			continue
 		}
@@ -175,7 +184,9 @@ func (c *HiveClient) RPCCall(ctx context.Context, method string, params []any) (
 			lastErr = err
 			log.Printf("Node %s failed: %v", node, err)
 			c.nextNode()
-			time.Sleep(100 * time.Millisecond)
+			if err := c.pauseBeforeRetry(ctx); err != nil {
+				return nil, err
+			}
 			continue
 		}
 
@@ -184,7 +195,9 @@ func (c *HiveClient) RPCCall(ctx context.Context, method string, params []any) (
 			lastErr = err
 			log.Printf("Node %s failed: %v", node, err)
 			c.nextNode()
-			time.Sleep(100 * time.Millisecond)
+			if err := c.pauseBeforeRetry(ctx); err != nil {
+				return nil, err
+			}
 			continue
 		}
 
@@ -192,6 +205,19 @@ func (c *HiveClient) RPCCall(ctx context.Context, method string, params []any) (
 			// RPC-level error: rotate and surface as a network error.
 			c.nextNode()
 			return nil, NewNetworkError("%s", formatRPCError(r.Error))
+		}
+
+		// Overloaded hived/jussi nodes answer with a valid envelope that
+		// omits result entirely. A literal null is a real answer (the
+		// block is not produced yet) and must be returned as-is.
+		if len(r.Result) == 0 {
+			lastErr = fmt.Errorf("empty result")
+			log.Printf("Node %s failed: empty result", node)
+			c.nextNode()
+			if err := c.pauseBeforeRetry(ctx); err != nil {
+				return nil, err
+			}
+			continue
 		}
 
 		return r.Result, nil
@@ -208,6 +234,7 @@ func (c *HiveClient) GetDynamicGlobalProperties(ctx context.Context) (map[string
 	}
 	var props map[string]any
 	if err := json.Unmarshal(result, &props); err != nil {
+		c.nextNode()
 		return nil, NewError("malformed dynamic global properties response: %v", err)
 	}
 	return props, nil
@@ -224,6 +251,7 @@ func (c *HiveClient) GetBlock(ctx context.Context, blockNum int64) (map[string]a
 	}
 	var block map[string]any
 	if err := json.Unmarshal(result, &block); err != nil {
+		c.nextNode()
 		return nil, NewError("malformed block response: %v", err)
 	}
 	return block, nil
@@ -240,6 +268,7 @@ func (c *HiveClient) GetBlockHeader(ctx context.Context, blockNum int64) (map[st
 	}
 	var header map[string]any
 	if err := json.Unmarshal(result, &header); err != nil {
+		c.nextNode()
 		return nil, NewError("malformed block header response: %v", err)
 	}
 	return header, nil
