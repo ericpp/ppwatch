@@ -40,6 +40,10 @@ type BotConfig struct {
 	UserAgentEmail string
 	DebugLogging   bool
 
+	// LiveItem verification
+	LiveVerifyRetries    int     // extra attempts after the first fetch
+	LiveVerifyRetryDelay float64 // seconds between attempts
+
 	// Feed aliases: name -> feed_id (e.g. {"bts": 150842})
 	FeedAliases map[string]int64
 }
@@ -85,6 +89,8 @@ func FromMap(data map[string]any) *BotConfig {
 		UserAgentEmail:       "user@email.com",
 		DebugLogging:         true,
 		FeedAliases:          map[string]int64{},
+		LiveVerifyRetries:    3,
+		LiveVerifyRetryDelay: 20.0,
 	}
 
 	setStr(irc, "host", &cfg.IrcHost)
@@ -110,6 +116,8 @@ func FromMap(data map[string]any) *BotConfig {
 	setFloat(data, "api_timeout", &cfg.APITimeout)
 	setStr(data, "user_agent_email", &cfg.UserAgentEmail)
 	setBool(data, "debug_logging", &cfg.DebugLogging)
+	setInt(data, "live_verify_retries", &cfg.LiveVerifyRetries)
+	setFloat(data, "live_verify_retry_delay", &cfg.LiveVerifyRetryDelay)
 
 	if subs, ok := section(data, "channel_subscriptions"); ok {
 		for ch, v := range subs {

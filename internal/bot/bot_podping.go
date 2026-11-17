@@ -46,9 +46,38 @@ func (b *Bot) GetPodcastInfo(url string) (string, int64) {
 }
 
 // CheckLiveItemStatus fetches the feed and checks whether the liveItem
-// closest to now has status="live". Returns (isLive, errorMessage) where
-// isLive < 0 means "could not determine".
+// closest to now has status="live". Transient failures (HTTP 5xx/429,
+// network errors, timeouts) are retried up to Config.LiveVerifyRetries
+// times with Config.LiveVerifyRetryDelay between attempts, since some
+// hosts take a while to publish feed updates after a podping. Returns
+// (isLive, errorMessage) where isLive < 0 means "could not determine".
 func (b *Bot) CheckLiveItemStatus(feedURL string) (int, string) {
+	retries := b.Config.LiveVerifyRetries
+	if retries < 0 {
+		retries = 0
+	}
+	delay := b.Config.LiveVerifyRetryDelay
+	if delay < 0 {
+		delay = 0
+	}
+
+	var live int
+	var errMsg string
+	var retryable bool
+	for attempt := 0; ; attempt++ {
+		live, errMsg, retryable = b.checkLiveItemStatusOnce(feedURL)
+		if live >= 0 || !retryable || attempt >= retries {
+			return live, errMsg
+		}
+		log.Printf("Feed fetch failed (%s), retrying %d/%d in %.0fs", errMsg, attempt+1, retries, delay)
+		time.Sleep(time.Duration(delay * float64(time.Second)))
+	}
+}
+
+// checkLiveItemStatusOnce performs a single feed fetch and liveItem
+// check. Returns (isLive, errorMessage, retryable) where retryable
+// indicates the failure looks transient and is worth retrying.
+func (b *Bot) checkLiveItemStatusOnce(feedURL string) (int, string, bool) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(b.Config.APITimeout*float64(time.Second)))
 	defer cancel()
 
@@ -56,44 +85,47 @@ func (b *Bot) CheckLiveItemStatus(feedURL string) (int, string) {
 	if err != nil {
 		msg := fmt.Sprintf("Request error fetching feed %s: %v", feedURL, err)
 		log.Printf("%s", msg)
-		return -1, msg
+		return -1, msg, false
 	}
 	resp, err := b.httpClient().Do(req)
 	if err != nil {
 		if ctx.Err() == context.DeadlineExceeded {
 			msg := fmt.Sprintf("Timeout fetching feed %s", feedURL)
 			log.Printf("%s", msg)
-			return -1, msg
+			return -1, msg, true
 		}
 		msg := fmt.Sprintf("Request error fetching feed %s: %v", feedURL, err)
 		log.Printf("%s", msg)
-		return -1, msg
+		return -1, msg, true
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		msg := fmt.Sprintf("HTTP %d %s fetching feed %s", resp.StatusCode, http.StatusText(resp.StatusCode), feedURL)
 		log.Printf("%s", msg)
-		return -1, msg
+		// 429 and 5xx responses are usually transient (feeds being
+		// regenerated, server hiccups); 4xx errors are not.
+		retryable := resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= http.StatusInternalServerError
+		return -1, msg, retryable
 	}
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		msg := fmt.Sprintf("Request error fetching feed %s: %v", feedURL, err)
 		log.Printf("%s", msg)
-		return -1, msg
+		return -1, msg, true
 	}
 
 	liveItems := rss.FindLiveItems(body)
 	if len(liveItems) == 0 {
 		log.Printf("No liveItem elements found in %s", feedURL)
-		return 0, ""
+		return 0, "", false
 	}
 
 	closest, ok := rss.FindClosestLiveItem(liveItems)
 	if !ok {
 		log.Printf("No liveItem elements found in %s", feedURL)
-		return 0, ""
+		return 0, "", false
 	}
 
 	live := 0
@@ -101,7 +133,7 @@ func (b *Bot) CheckLiveItemStatus(feedURL string) (int, string) {
 		live = 1
 	}
 	log.Printf("Closest liveItem in %s has status='%s' (start=%s)", feedURL, closest.Status, closest.Start)
-	return live, ""
+	return live, "", false
 }
 
 // VerifyLiveStatus verifies that the feed's liveItem status matches the

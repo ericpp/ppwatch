@@ -40,7 +40,7 @@ The JSON configuration file has these sections:
 | `irc` | `host`, `port`, `nick`, `user`, `realname`, `secure`, `nickserv_password` |
 | `podcast_index` | `api_key`, `api_secret` |
 | `podping_writer` | `hive_account`, `hive_posting_key`, `hive_nodes`, `dry_run` |
-| top level | `channel_subscriptions`, `feed_aliases`, `command_name`, `message_delay`, `api_timeout`, `user_agent_email`, `debug_logging` |
+| top level | `channel_subscriptions`, `feed_aliases`, `command_name`, `message_delay`, `api_timeout`, `user_agent_email`, `debug_logging`, `live_verify_retries`, `live_verify_retry_delay` |
 
 `channel_subscriptions` maps a channel to a feed URL or list of URLs.
 `feed_aliases` maps short names to Podcast Index feed ids, e.g.
